@@ -269,13 +269,16 @@ export async function signLedgerTransaction(
     const app = new StrApp(transport);
 
     const tx = TransactionBuilder.fromXDR(preparedXdr, networkPassphrase);
-    const signatureBuffer = await app.signTransaction(normalizedPath, tx.signatureBase());
+    const signatureBuffer = await app.signTransaction(
+      normalizedPath,
+      Buffer.from(tx.signatureBase()),
+    );
 
     const pubKeyResult = await app.getPublicKey(normalizedPath, false);
     const publicKey = StrKey.encodeEd25519PublicKey(pubKeyResult.rawPublicKey);
 
     // Attach signature to Stellar transaction envelope
-    tx.addSignature(publicKey, signatureBuffer.signature);
+    tx.addSignature(publicKey, signatureBuffer.signature as any);
     return tx.toXDR();
   } catch (err: any) {
     const parsed = parseLedgerError(err);
