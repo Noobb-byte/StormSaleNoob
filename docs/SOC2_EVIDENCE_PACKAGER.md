@@ -63,7 +63,7 @@ Add the platform auditor private key to your `.env` file:
 ```env
 # Platform Auditor Key for Automated SOC 2 Type II Evidence Packaging
 # Ed25519 Secret Key (Stellar format S... or 64-char hex string)
-VITE_AUDITOR_PRIVATE_KEY=SA45OAZNPWEIYA4DYJM2NVK2GEMCNLCY4YFI26RONDB4FN2U7D6QBBEH
+VITE_AUDITOR_PRIVATE_KEY=<your-auditor-secret-seed>
 ```
 
 > **Important**: Never commit auditor private keys to version control. The generator will strictly throw an `AuditorSigningError` and refuse to produce an unsigned evidence pack if the key is missing or invalid.
