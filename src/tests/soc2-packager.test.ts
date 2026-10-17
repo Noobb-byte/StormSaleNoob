@@ -112,9 +112,24 @@ describe("SOC 2 Evidence Packager - Evidence & Control Manifest", () => {
     const ciLogs = collectCiAuditLogs();
     expect(ciLogs.length).toBeGreaterThanOrEqual(3);
 
-    const testRuns = collectTestRunResults();
-    expect(testRuns.totalTests).toBeGreaterThanOrEqual(70);
-    expect(testRuns.allPassed).toBe(true);
+    // When real results are missing, status indicates Review Needed without fake pass claims
+    const emptyRuns = collectTestRunResults();
+    expect(emptyRuns.totalTests).toBe(0);
+    expect(emptyRuns.allPassed).toBe(false);
+
+    // When real Vitest JSON execution results are supplied
+    const sampleResults = JSON.stringify({
+      numTotalTests: 89,
+      numPassedTests: 89,
+      numFailedTests: 0,
+      numTotalTestSuites: 9,
+      testResults: [
+        { name: "src/tests/soc2-packager.test.ts", assertionResults: [{ status: "passed" }] },
+      ],
+    });
+    const parsedRuns = collectTestRunResults(sampleResults);
+    expect(parsedRuns.totalTests).toBe(89);
+    expect(parsedRuns.allPassed).toBe(true);
   });
 });
 
@@ -161,10 +176,12 @@ describe("SOC 2 Evidence Packager - Cryptographic Signing & Validation", () => {
 });
 
 describe("SOC 2 Evidence Packager - Packaging & Tamper Detection", () => {
+  let testKeypair: Keypair;
   let testSecret: string;
 
   beforeEach(() => {
-    testSecret = Keypair.random().secret();
+    testKeypair = Keypair.random();
+    testSecret = testKeypair.secret();
   });
 
   it("generates a complete, structured ZIP evidence pack", async () => {
@@ -276,6 +293,74 @@ describe("SOC 2 Evidence Packager - Packaging & Tamper Detection", () => {
     expect(verification.valid).toBe(false);
     expect(verification.signatureValid).toBe(false);
   });
+
+  it("rejects an evidence pack re-signed by an unauthorized attacker key (key pinning)", async () => {
+    const pack = await generateSoc2EvidencePack({
+      auditorPrivateKey: testSecret,
+    });
+
+    const jszip = new JSZip();
+    const loadedZip = await jszip.loadAsync(pack.zipBuffer);
+
+    // Tamper with contract state
+    const targetFileKey = Object.keys(loadedZip.files).find((k) =>
+      k.endsWith("contracts/contract-state.json"),
+    );
+    loadedZip.file(targetFileKey!, JSON.stringify({ tampered: true, evilData: 999 }));
+
+    // Recompute hashes
+    const updatedFiles: Record<string, Uint8Array> = {};
+    for (const [relPath, entry] of Object.entries(loadedZip.files)) {
+      if (!entry.dir && !relPath.endsWith("hashes.json") && !relPath.endsWith("signature.json")) {
+        updatedFiles[relPath] = await entry.async("uint8array");
+      }
+    }
+    const newHashes = await generateHashesManifest(updatedFiles);
+
+    // Attacker signs with their own key
+    const attackerKeypair = Keypair.random();
+    const attackerSig = signRootDigest(newHashes.rootDigest, attackerKeypair.secret());
+
+    const hashKey = Object.keys(loadedZip.files).find((k) => k.endsWith("hashes.json"))!;
+    const sigKey = Object.keys(loadedZip.files).find((k) => k.endsWith("signature.json"))!;
+    const pemKey = Object.keys(loadedZip.files).find((k) => k.endsWith("public-key.pem"))!;
+
+    loadedZip.file(hashKey, JSON.stringify(newHashes, null, 2));
+    loadedZip.file(sigKey, JSON.stringify(attackerSig, null, 2));
+    loadedZip.file(pemKey, attackerSig.publicKeyPem);
+
+    const tamperedBuffer = await loadedZip.generateAsync({ type: "uint8array" });
+
+    // Validate with legitimate key pinned
+    const verification = await verifyEvidenceZip(tamperedBuffer, {
+      authorizedKeys: [testKeypair.publicKey()],
+    });
+
+    expect(verification.valid).toBe(false);
+    expect(verification.signatureValid).toBe(false);
+    expect(
+      verification.errors.some((e) => e.includes("not in the authorized auditor key allowlist")),
+    ).toBe(true);
+  });
+
+  it("rejects archive entries not listed in hashes.json", async () => {
+    const pack = await generateSoc2EvidencePack({
+      auditorPrivateKey: testSecret,
+    });
+
+    const jszip = new JSZip();
+    const loadedZip = await jszip.loadAsync(pack.zipBuffer);
+
+    // Inject extra unauthorized payload
+    loadedZip.file("unauthorized-file.txt", "untracked payload");
+
+    const tamperedBuffer = await loadedZip.generateAsync({ type: "uint8array" });
+    const verification = await verifyEvidenceZip(tamperedBuffer);
+
+    expect(verification.valid).toBe(false);
+    expect(verification.tamperedFiles.some((f) => f.includes("unauthorized-file.txt"))).toBe(true);
+    expect(verification.errors.some((e) => e.includes("not listed in hashes.json"))).toBe(true);
+  });
 });
 
 describe("SOC 2 Evidence Packager - RBAC Authorization & Audit Logging", () => {
@@ -322,6 +407,33 @@ describe("SOC 2 Evidence Packager - RBAC Authorization & Audit Logging", () => {
       }),
     ).toBe(true);
 
+    // 6. Explicit trusted on-chain grant
+    expect(
+      isAuthorizedForSoc2Export({
+        userAddress: "GB1234567890",
+        userRole: "NONE",
+        isAuditorGranted: true,
+      }),
+    ).toBe(true);
+
+    // 7. Revoked on-chain grant (denied even if role string says AUDITOR)
+    expect(
+      isAuthorizedForSoc2Export({
+        userAddress: "GB1234567890",
+        userRole: "AUDITOR",
+        isAuditorGranted: false,
+      }),
+    ).toBe(false);
+
+    // 8. Verified server session token
+    expect(
+      isAuthorizedForSoc2Export({
+        userAddress: "GB1234567890",
+        userRole: "NONE",
+        sessionToken: "valid-session-jwt",
+      }),
+    ).toBe(true);
+
     // Calling exportSoc2EvidencePackAction with unauthorized context throws AuditorAuthorizationError
     await expect(
       exportSoc2EvidencePackAction(
@@ -364,11 +476,24 @@ describe("SOC 2 Evidence Packager - RBAC Authorization & Audit Logging", () => {
     fs.writeFileSync(tempZipPath, pack.zipBuffer);
 
     try {
-      const output = execSync(`node scripts/verify-evidence-pack.mjs "${tempZipPath}"`, {
-        encoding: "utf8",
-      });
+      const output = execSync(
+        `node scripts/verify-evidence-pack.mjs "${tempZipPath}" "${pack.signature.keyId}"`,
+        {
+          encoding: "utf8",
+        },
+      );
       expect(output).toContain("VERIFICATION SUCCESSFUL");
       expect(output).toContain("Auditor Ed25519 digital signature is VALID");
+
+      // Confirm rejection when unexpected key is supplied
+      expect(() => {
+        execSync(
+          `node scripts/verify-evidence-pack.mjs "${tempZipPath}" "GDW4F2QWM3H5T4CDWAFANWAZL24XJDG3HYS22A27RATNQ6MQNE7CE5VW"`,
+          {
+            stdio: "pipe",
+          },
+        );
+      }).toThrow();
     } finally {
       if (fs.existsSync(tempZipPath)) {
         fs.unlinkSync(tempZipPath);

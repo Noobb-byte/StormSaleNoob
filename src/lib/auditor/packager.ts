@@ -13,7 +13,7 @@ import {
   buildBundleManifest,
 } from "./evidenceCollector";
 import { createEvidenceReceipt, createBundleReceipt } from "./receipts";
-import { signRootDigest } from "./signer";
+import { signRootDigest, resolveAuditorKeypair, formatEd25519PublicKeyPem } from "./signer";
 import type {
   EvidencePackGenerationOptions,
   EvidenceReceipt,
@@ -37,12 +37,11 @@ export interface EvidencePackBundleResult {
 /**
  * Builds the verification instructions text file included in every pack.
  */
-function buildReadmeText(rootDigest: string, keyId: string, timestamp: string): string {
+function buildReadmeText(keyId: string, timestamp: string): string {
   return `================================================================================
 STORMSALE PROTOCOL - SOC 2 TYPE II AUDIT EVIDENCE PACK
 ================================================================================
 Generated At:      ${timestamp}
-Root Digest:       ${rootDigest}
 Auditor Key ID:    ${keyId}
 Algorithm:         Ed25519 with SHA-256 Digest
 Trust Criteria:    Confidentiality, Processing Integrity, Availability
@@ -59,6 +58,7 @@ PACKAGE CONTENTS:
     receipts-manifest.json    Index of all evidence file receipts
   contracts/                  Smart contract state snapshots and control specifications
     contract-state.json       Live Soroban contract state, network parameters, addresses
+    deployment-manifest.json  Deployed contract addresses and network configuration
     escrow-controls.json      On-chain commission escrow locking and budget rules
   ci/                         Continuous integration security definitions and logs
     ci-audit-summary.json     Automated quality gate verification summary
@@ -75,8 +75,8 @@ Method 1: Automated In-Browser Verification
   3. The portal will verify the Ed25519 signature and re-compute all SHA-256 hashes.
 
 Method 2: Standalone Node.js CLI Script
-  Run the bundled verification tool from the repository root:
-    node scripts/verify-evidence-pack.mjs path/to/this-bundle.zip
+  Run the bundled verification tool with the expected auditor public key:
+    node scripts/verify-evidence-pack.mjs path/to/this-bundle.zip <expected-auditor-public-key>
 
 Method 3: Manual Cryptographic Verification (OpenSSL & sha256sum)
   1. Verify file integrity against hashes.json:
@@ -103,10 +103,18 @@ export async function generateSoc2EvidencePack(
   const folderName = `soc2-evidence-pack-${dateFormatted}`;
   const filename = `${folderName}.zip`;
 
+  // Pre-validate auditor key
+  const keypair = resolveAuditorKeypair(options.auditorPrivateKey);
+  const keyId = keypair.publicKey();
+  const publicKeyPem = formatEd25519PublicKeyPem(keypair.rawPublicKey());
+
   // 1. Collect evidence artifacts
+  options.onProgress?.("Snapshotting Soroban smart contract state & security controls...");
   const contractState = collectContractControlState();
+
+  options.onProgress?.("Aggregating CI test runs and quality gate logs...");
   const ciAuditLogs = collectCiAuditLogs();
-  const testResults = collectTestRunResults();
+  const testResults = collectTestRunResults(options.testResultsJson);
 
   const escrowControls = {
     escrowModel: "Soroban Persistent Storage Multi-Party Escrow",
@@ -225,51 +233,48 @@ export async function generateSoc2EvidencePack(
   // Write receipts to file records
   internalFiles["receipts/receipts-manifest.json"] = JSON.stringify(receipts, null, 2);
 
+  // Construct root-independent artifacts and include them in the hashed set
+  const bundleReceipt = createBundleReceipt(receipts, keyId, timestamp);
+  internalFiles["receipts/bundle-receipt.json"] = JSON.stringify(bundleReceipt, null, 2);
+
+  const readme = buildReadmeText(keyId, timestamp);
+  internalFiles["README.txt"] = readme;
+
+  internalFiles["public-key.pem"] = publicKeyPem;
+
+  const manifest = buildBundleManifest(undefined, testResults);
+  internalFiles["manifest.json"] = JSON.stringify(manifest, null, 2);
+
   // 4. Compute deterministic Codebase & Evidence Hashes Manifest
+  options.onProgress?.("Calculating deterministic SHA-256 codebase hashes and Merkle root...");
   const hashesManifest = await generateHashesManifest(internalFiles, {
     timestamp,
     version: "1.0.0",
   });
 
-  // 6. Sign the root digest with the platform auditor Ed25519 key
-  // Strict check: fails with AuditorSigningError if key is missing or invalid
+  // 5. Sign the root digest with the platform auditor Ed25519 key
+  options.onProgress?.("Signing package root digest with platform auditor Ed25519 key...");
   const signature = signRootDigest(
     hashesManifest.rootDigest,
     options.auditorPrivateKey,
     options.auditorOrganization,
   );
 
-  // 7. Generate bundle-level root verification receipt
-  const bundleReceipt = createBundleReceipt(
-    hashesManifest.rootDigest,
-    receipts,
-    signature.keyId,
-    timestamp,
-  );
+  // 6. Populate root-dependent fields on in-memory objects after root digest is computed
+  manifest.rootDigest = hashesManifest.rootDigest;
+  manifest.signatureInfo = {
+    algorithm: signature.algorithm,
+    keyId: signature.keyId,
+    signatureHex: signature.signatureHex,
+  };
+  bundleReceipt.rootDigest = hashesManifest.rootDigest;
 
-  // 8. Generate README.txt
-  const readme = buildReadmeText(hashesManifest.rootDigest, signature.keyId, timestamp);
-
-  // 9. Compile bundle manifest mapping controls to evidence
-  const manifest = buildBundleManifest(
-    hashesManifest.rootDigest,
-    {
-      algorithm: signature.algorithm,
-      keyId: signature.keyId,
-      signatureHex: signature.signatureHex,
-    },
-    hashesManifest.commitSha,
-  );
-
-  // Set all files into bundle map
+  // Add metadata verification files
   internalFiles["hashes.json"] = JSON.stringify(hashesManifest, null, 2);
   internalFiles["signature.json"] = JSON.stringify(signature, null, 2);
-  internalFiles["public-key.pem"] = signature.publicKeyPem;
-  internalFiles["receipts/bundle-receipt.json"] = JSON.stringify(bundleReceipt, null, 2);
-  internalFiles["README.txt"] = readme;
-  internalFiles["manifest.json"] = JSON.stringify(manifest, null, 2);
 
-  // 10. Assemble ZIP archive with folder structure
+  // 7. Assemble ZIP archive with folder structure
+  options.onProgress?.("Packaging verification receipts and compiling ZIP archive...");
   const zip = new JSZip();
   const rootFolder = zip.folder(folderName) || zip;
 

@@ -1,6 +1,7 @@
 import StrApp from "@ledgerhq/hw-app-str";
 import TransportWebHID from "@ledgerhq/hw-transport-webhid";
 import { Keypair, TransactionBuilder, StrKey } from "@stellar/stellar-sdk";
+import { Buffer } from "buffer";
 import { STELLAR_CONFIG } from "../config/stellar";
 
 export interface LedgerDeviceInfo {

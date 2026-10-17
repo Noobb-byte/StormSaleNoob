@@ -11,9 +11,12 @@ import { Keypair } from "@stellar/stellar-sdk";
 import crypto from "crypto";
 
 const targetZipPath = process.argv[2];
+const expectedKeyId = process.argv[3];
 
-if (!targetZipPath) {
-  console.error("Usage: node scripts/verify-evidence-pack.mjs <path-to-evidence-pack.zip>");
+if (!targetZipPath || !expectedKeyId) {
+  console.error(
+    "Usage: node scripts/verify-evidence-pack.mjs <path-to-evidence-pack.zip> <expected-auditor-public-key>",
+  );
   process.exit(1);
 }
 
@@ -60,7 +63,6 @@ async function verify() {
   // 1. Locate signature.json & hashes.json
   const sigKey = Object.keys(filesMap).find((k) => k.endsWith("signature.json"));
   const hashKey = Object.keys(filesMap).find((k) => k.endsWith("hashes.json"));
-  const manifestKey = Object.keys(filesMap).find((k) => k.endsWith("manifest.json"));
 
   if (!sigKey || !hashKey) {
     console.error("❌ Verification failed: Archive is missing signature.json or hashes.json.");
@@ -71,10 +73,19 @@ async function verify() {
   const hashesManifest = JSON.parse(filesMap[hashKey].toString("utf8"));
 
   console.log(`\n• Auditor Key ID:         ${sigRecord.keyId}`);
+  console.log(`• Expected Key ID:        ${expectedKeyId}`);
   console.log(`• Signature Algorithm:    ${sigRecord.algorithm}`);
   console.log(`• Auditor Organization:   ${sigRecord.auditorOrganization}`);
   console.log(`• Package Root Digest:    ${sigRecord.signedRootDigest}`);
   console.log(`• Generation Timestamp:   ${sigRecord.timestamp}`);
+
+  // Validate Key Pinning
+  if (sigRecord.keyId !== expectedKeyId) {
+    console.error(
+      `\n[FAIL] ❌ Key pinning failed! Auditor Key ID ${sigRecord.keyId} does not match expected authorized key ${expectedKeyId}.`,
+    );
+    process.exit(1);
+  }
 
   // 2. Verify Cryptographic Signature
   let sigValid = false;
@@ -96,8 +107,7 @@ async function verify() {
   // 3. Verify Root Digest from file hashes
   const recomputedRoot = computeRootDigest(hashesManifest.files);
   const rootDigestMatches =
-    recomputedRoot === hashesManifest.rootDigest &&
-    recomputedRoot === sigRecord.signedRootDigest;
+    recomputedRoot === hashesManifest.rootDigest && recomputedRoot === sigRecord.signedRootDigest;
 
   if (rootDigestMatches) {
     console.log("[PASS] ✅ Manifest Root Digest matches signed digest.");
@@ -131,6 +141,16 @@ async function verify() {
       console.error(
         `  ❌ TAMPER DETECTED in ${relPath}! Expected ${expectedHash}, got ${actualHash}`,
       );
+      mismatchCount++;
+    }
+  }
+
+  // 5. Reject any archive entries not listed in hashes.json
+  for (const rawKey of Object.keys(filesMap)) {
+    const relKey = prefix && rawKey.startsWith(prefix) ? rawKey.slice(prefix.length) : rawKey;
+    if (relKey === "hashes.json" || relKey === "signature.json") continue;
+    if (!hashesManifest.files[relKey]) {
+      console.error(`  ❌ TAMPER DETECTED: Archive entry not listed in hashes.json: ${relKey}`);
       mismatchCount++;
     }
   }

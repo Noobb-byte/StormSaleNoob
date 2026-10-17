@@ -50,7 +50,7 @@ export async function createEvidenceReceipt(
 export interface BundleReceipt {
   receiptId: string;
   bundleTitle: string;
-  rootDigest: string;
+  rootDigest?: string;
   rootAlgorithm: "SHA-256";
   generator: string;
   timestamp: string;
@@ -67,19 +67,39 @@ export interface BundleReceipt {
 
 /**
  * Creates the bundle-level root verification receipt.
+ * Supports being constructed without root-dependent fields so it can be included in the hashed set.
  */
 export function createBundleReceipt(
-  rootDigest: string,
-  fileReceipts: EvidenceReceipt[],
-  signerKeyId: string,
-  timestamp: string = new Date().toISOString(),
+  arg1: string | EvidenceReceipt[],
+  arg2: EvidenceReceipt[] | string,
+  arg3?: string,
+  arg4?: string,
 ): BundleReceipt {
+  let rootDigest: string | undefined;
+  let fileReceipts: EvidenceReceipt[];
+  let signerKeyId: string;
+  let timestamp: string = new Date().toISOString();
+
+  if (typeof arg1 === "string" && Array.isArray(arg2)) {
+    rootDigest = arg1;
+    fileReceipts = arg2;
+    signerKeyId = (arg3 as string) || "UNKNOWN";
+    if (arg4) timestamp = arg4;
+  } else if (Array.isArray(arg1)) {
+    fileReceipts = arg1;
+    signerKeyId = (arg2 as string) || "UNKNOWN";
+    if (arg3) timestamp = arg3;
+    if (arg4) rootDigest = arg4;
+  } else {
+    fileReceipts = [];
+    signerKeyId = "UNKNOWN";
+  }
+
   const totalSizeBytes = fileReceipts.reduce((acc, r) => acc + r.sizeBytes, 0);
 
-  return {
+  const receipt: BundleReceipt = {
     receiptId: generateReceiptId(),
     bundleTitle: "StormSale SOC 2 Type II Root Verification Receipt",
-    rootDigest,
     rootAlgorithm: "SHA-256",
     generator: GENERATOR_VERSION,
     timestamp,
@@ -93,4 +113,10 @@ export function createBundleReceipt(
       category: r.category,
     })),
   };
+
+  if (rootDigest) {
+    receipt.rootDigest = rootDigest;
+  }
+
+  return receipt;
 }

@@ -58,15 +58,18 @@ soc2-evidence-pack-<YYYYMMDD-HHmmss>/
 
 ## 🔑 Environment Configuration
 
-Add the platform auditor private key to your `.env` file:
+Add the platform auditor private key to your server or CI environment (or `.env` for local script execution):
 
 ```env
-# Platform Auditor Key for Automated SOC 2 Type II Evidence Packaging
+# Server/CI Platform Auditor Key for Automated SOC 2 Type II Evidence Packaging
 # Ed25519 Secret Key (Stellar format S... or 64-char hex string)
-VITE_AUDITOR_PRIVATE_KEY=<your-auditor-secret-seed>
+AUDITOR_PRIVATE_KEY=<your-auditor-secret-seed>
+
+# Optional client-side allowlist of trusted auditor public keys for in-browser verification
+VITE_AUTHORIZED_AUDITOR_KEYS=<auditor-public-key-G...>
 ```
 
-> **Important**: Never commit auditor private keys to version control. The generator will strictly throw an `AuditorSigningError` and refuse to produce an unsigned evidence pack if the key is missing or invalid.
+> **Important**: Never commit auditor private keys to version control or expose them in client bundles with `VITE_`. The packager will strictly throw an `AuditorSigningError` and refuse to produce an unsigned evidence pack if the key is missing or invalid.
 
 ### Generating a New Auditor Keypair
 
@@ -79,7 +82,7 @@ node scripts/generate-auditor-key.mjs
 This will output:
 
 - **Public Key (Key ID)**: `G...` (recorded in `public-key.pem` and `signature.json`)
-- **Secret Seed**: `S...` (to be set in `VITE_AUDITOR_PRIVATE_KEY`)
+- **Secret Seed**: `S...` (to be set in `AUDITOR_PRIVATE_KEY`)
 
 ---
 
@@ -87,7 +90,7 @@ This will output:
 
 ### 1. From the Auditor Enterprise Portal UI
 
-1. Connect your Stellar wallet and assume the **Auditor** role from the Dashboard or Auditor Portal.
+1. Connect your Stellar wallet and verify the **Auditor** role from the Dashboard or Auditor Portal.
 2. Navigate to **Compliance Report** (or the **SOC 2 Evidence** tab).
 3. Click **"Export SOC 2 Evidence Pack"**.
 4. The application will collect contract state, aggregate test and CI logs, compute deterministic SHA-256 digests, sign the bundle with the auditor key, and download `soc2-evidence-pack-<timestamp>.zip`.
@@ -104,7 +107,7 @@ const result = await exportSoc2EvidencePackAction(
     userRole: "AUDITOR",
   },
   {
-    auditorPrivateKey: process.env.VITE_AUDITOR_PRIVATE_KEY,
+    auditorPrivateKey: process.env.AUDITOR_PRIVATE_KEY,
   },
 );
 
@@ -121,14 +124,14 @@ console.log("Signed by:", result.signature.keyId);
 1. Open the StormSale Auditor Enterprise Portal -> **Compliance Report**.
 2. Scroll to the **Independent Pack Verification Suite**.
 3. Drag and drop the downloaded ZIP archive into the dropzone.
-4. The client re-computes all SHA-256 hashes, checks the Merkle root digest, and verifies the Ed25519 digital signature offline.
+4. The client re-computes all SHA-256 hashes, checks the Merkle root digest, validates every file against `hashes.json`, and verifies the Ed25519 digital signature against configured authorized auditor keys.
 
 ### Method 2: Standalone CLI Verification Script
 
-Compliance reviewers can verify any pack without running the web server:
+Compliance reviewers can verify any pack without running the web server by supplying the expected auditor public key:
 
 ```bash
-node scripts/verify-evidence-pack.mjs path/to/soc2-evidence-pack-<date>.zip
+node scripts/verify-evidence-pack.mjs path/to/soc2-evidence-pack-<date>.zip <expected-auditor-public-key>
 ```
 
 Output:

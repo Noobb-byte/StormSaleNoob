@@ -12,11 +12,36 @@ import type {
   AuditorSignatureRecord,
 } from "./types";
 
+export interface VerificationOptions {
+  authorizedKeys?: string[];
+}
+
+let configuredAuthorizedKeys: string[] = [];
+
+export function setAuthorizedAuditorKeys(keys: string[]): void {
+  configuredAuthorizedKeys = [...keys];
+}
+
+export function getAuthorizedAuditorKeys(): string[] {
+  if (configuredAuthorizedKeys.length > 0) {
+    return [...configuredAuthorizedKeys];
+  }
+  const envKeys =
+    typeof import.meta !== "undefined" && import.meta.env?.VITE_AUTHORIZED_AUDITOR_KEYS
+      ? (import.meta.env.VITE_AUTHORIZED_AUDITOR_KEYS as string)
+          .split(",")
+          .map((k) => k.trim())
+          .filter(Boolean)
+      : [];
+  return envKeys;
+}
+
 /**
  * Verifies an in-memory evidence pack file map (path -> content).
  */
 export async function verifyEvidenceFiles(
   files: Record<string, string | Uint8Array>,
+  options?: VerificationOptions,
 ): Promise<PackVerificationResult> {
   const errors: string[] = [];
   const tamperedFiles: string[] = [];
@@ -102,15 +127,27 @@ export async function verifyEvidenceFiles(
     };
   }
 
-  // 2. Cryptographic signature check
-  const signatureValid = verifyAuditorSignature(
-    signatureRecord.signedRootDigest,
-    signatureRecord.signatureHex,
-    signatureRecord.keyId,
-  );
+  // 2. Cryptographic signature & key authorization check
+  const allowlist =
+    options?.authorizedKeys && options.authorizedKeys.length > 0
+      ? options.authorizedKeys
+      : getAuthorizedAuditorKeys();
 
-  if (!signatureValid) {
-    errors.push(`Auditor Ed25519 signature is INVALID for Key ID ${signatureRecord.keyId}.`);
+  let signatureValid = false;
+
+  if (allowlist.length > 0 && !allowlist.includes(signatureRecord.keyId)) {
+    errors.push(
+      `Auditor Key ID ${signatureRecord.keyId} is not in the authorized auditor key allowlist.`,
+    );
+  } else {
+    signatureValid = verifyAuditorSignature(
+      signatureRecord.signedRootDigest,
+      signatureRecord.signatureHex,
+      signatureRecord.keyId,
+    );
+    if (!signatureValid) {
+      errors.push(`Auditor Ed25519 signature is INVALID for Key ID ${signatureRecord.keyId}.`);
+    }
   }
 
   // 3. Root digest consistency check
@@ -152,6 +189,21 @@ export async function verifyEvidenceFiles(
     }
   }
 
+  // 5. Reject archive entries not listed in hashes.json
+  for (const rawKey of Object.keys(files)) {
+    const normalizedKey = normalizePath(rawKey);
+    const relPath =
+      prefix && normalizedKey.startsWith(prefix)
+        ? normalizedKey.slice(prefix.length)
+        : normalizedKey;
+
+    if (relPath === "hashes.json" || relPath === "signature.json") continue;
+    if (!hashesManifest.files[relPath]) {
+      errors.push(`Archive entry is not listed in hashes.json: ${relPath}`);
+      tamperedFiles.push(relPath);
+    }
+  }
+
   // Verify manifest.json itself if present
   if (manifestKey && files[manifestKey]) {
     try {
@@ -160,7 +212,7 @@ export async function verifyEvidenceFiles(
           ? (files[manifestKey] as string)
           : new TextDecoder().decode(files[manifestKey] as Uint8Array);
       const parsedManifest = JSON.parse(rawManifest);
-      if (parsedManifest.rootDigest !== hashesManifest.rootDigest) {
+      if (parsedManifest.rootDigest && parsedManifest.rootDigest !== hashesManifest.rootDigest) {
         errors.push("manifest.json rootDigest differs from hashes.json rootDigest.");
       }
     } catch {
@@ -188,6 +240,7 @@ export async function verifyEvidenceFiles(
  */
 export async function verifyEvidenceZip(
   zipData: ArrayBuffer | Uint8Array | Blob,
+  options?: VerificationOptions,
 ): Promise<PackVerificationResult> {
   const jszip = new JSZip();
   const loadedZip = await jszip.loadAsync(zipData);
@@ -206,5 +259,5 @@ export async function verifyEvidenceZip(
   });
 
   await Promise.all(filePromises);
-  return await verifyEvidenceFiles(filesMap);
+  return await verifyEvidenceFiles(filesMap, options);
 }

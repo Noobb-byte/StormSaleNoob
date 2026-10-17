@@ -92,16 +92,9 @@ export async function generateHashesManifest(
     if (isIgnoredPath(path)) continue;
 
     const content = fileMap[rawPath];
-    let hash: string;
-    let byteLength = 0;
-
-    if (typeof content === "string") {
-      hash = await sha256Hex(content);
-      byteLength = new TextEncoder().encode(content).length;
-    } else {
-      hash = await sha256Hex(content);
-      byteLength = content.byteLength;
-    }
+    const hash = await sha256Hex(content);
+    const byteLength =
+      typeof content === "string" ? new TextEncoder().encode(content).length : content.byteLength;
 
     hashes[path] = hash;
     totalBytes += byteLength;

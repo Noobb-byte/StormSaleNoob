@@ -3,7 +3,8 @@
  * Signs evidence manifests and root digests using an authorized platform auditor Ed25519 key.
  */
 
-import { Keypair } from "@stellar/stellar-sdk";
+import { Keypair, StrKey } from "@stellar/stellar-sdk";
+import { Buffer } from "buffer";
 import type { AuditorSignatureRecord } from "./types";
 
 export class AuditorSigningError extends Error {
@@ -45,15 +46,13 @@ export function formatEd25519PublicKeyPem(rawPublicKey: Uint8Array): string {
  */
 export function resolveAuditorKeypair(privateKeyInput?: string | Uint8Array): Keypair {
   const envKey =
-    typeof import.meta !== "undefined" && import.meta.env
-      ? (import.meta.env.VITE_AUDITOR_PRIVATE_KEY as string | undefined)
-      : undefined;
+    typeof process !== "undefined" && process.env ? process.env.AUDITOR_PRIVATE_KEY : undefined;
 
   const resolved = (privateKeyInput || envKey || "").toString().trim();
 
   if (!resolved) {
     throw new AuditorSigningError(
-      "Platform auditor private key is missing. An unsigned SOC 2 evidence pack cannot be generated. Please configure VITE_AUDITOR_PRIVATE_KEY or supply an authorized auditor key.",
+      "Platform auditor private key is missing. An unsigned SOC 2 evidence pack cannot be generated. Please configure AUDITOR_PRIVATE_KEY in your server/CI environment or supply an authorized auditor key.",
     );
   }
 
@@ -143,7 +142,8 @@ export function verifyAuditorSignature(
       }
       // If SPKI format (44 bytes total, 12 bytes header + 32 bytes raw pub key)
       const rawPub = bytes.length === 44 ? bytes.slice(12) : bytes.slice(-32);
-      keypair = Keypair.fromRawEd25519Seed(Buffer.from(rawPub));
+      const stellarPublicKey = StrKey.encodeEd25519PublicKey(Buffer.from(rawPub));
+      keypair = Keypair.fromPublicKey(stellarPublicKey);
     }
 
     const dataToVerify = Buffer.from(new TextEncoder().encode(rootDigest));

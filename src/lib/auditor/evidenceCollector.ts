@@ -114,60 +114,91 @@ export function collectCiAuditLogs(): CiAuditLogItem[] {
 }
 
 /**
- * Gathers automated test run results. Uses runtime data, test-results.json if available,
- * or the repo's verified test suite execution metrics.
+ * Gathers automated test run results using real Vitest JSON execution records.
+ * If results are unavailable, corrupted, or missing, returns an audit status of
+ * Review Needed rather than claiming all tests passed.
  */
 export function collectTestRunResults(customResultsJson?: string): TestExecutionAudit {
-  if (customResultsJson) {
+  let jsonString = customResultsJson;
+
+  // In Node.js environments (CLI / test runner / CI), attempt to read test-results.json
+  if (!jsonString && typeof process !== "undefined" && process.versions?.node) {
     try {
-      const parsed = JSON.parse(customResultsJson);
-      return {
-        testFramework: "Vitest v5.0.1",
-        totalTests: parsed.numTotalTests || 70,
-        passedTests: parsed.numPassedTests || 70,
-        failedTests: parsed.numFailedTests || 0,
-        testSuitesCount: parsed.numTotalTestSuites || 8,
-        executionTimestamp: new Date().toISOString(),
-        allPassed: (parsed.numFailedTests || 0) === 0,
-        suiteBreakdown: (parsed.testResults || []).map((suite: any) => ({
-          suiteName: suite.name ? suite.name.replace(/^.*[\\/]src[\\/]/, "src/") : "Test Suite",
-          passed: (suite.assertionResults || []).filter((a: any) => a.status === "passed").length,
-          total: (suite.assertionResults || []).length,
-          durationMs:
-            suite.endTime && suite.startTime ? Math.round(suite.endTime - suite.startTime) : 25,
-        })),
-      };
+      // Use indirect eval so bundlers don't emit warnings or analyze as static Node imports
+      const req = (0, eval)("typeof require !== 'undefined' ? require : null");
+      if (req) {
+        const fs = req("fs");
+        const path = req("path");
+        const filePath = path.resolve(process.cwd(), "test-results.json");
+        if (fs.existsSync(filePath)) {
+          jsonString = fs.readFileSync(filePath, "utf8");
+        }
+      }
     } catch {
-      // Fall through to standard audit snapshot
+      // In browser or sandbox, Node fs is unavailable
     }
   }
 
-  // Standard verified repository suite snapshot
+  if (jsonString && jsonString.trim()) {
+    try {
+      const parsed = JSON.parse(jsonString);
+      const totalTests = typeof parsed.numTotalTests === "number" ? parsed.numTotalTests : 0;
+      const passedTests = typeof parsed.numPassedTests === "number" ? parsed.numPassedTests : 0;
+      const failedTests = typeof parsed.numFailedTests === "number" ? parsed.numFailedTests : 0;
+      const testSuitesCount =
+        typeof parsed.numTotalTestSuites === "number" ? parsed.numTotalTestSuites : 0;
+      const allPassed = totalTests > 0 && failedTests === 0;
+      const testResults = Array.isArray(parsed.testResults) ? parsed.testResults : [];
+      const suiteBreakdown = testResults.map(
+        (suite: {
+          name?: string;
+          assertionResults?: Array<{ status?: string }>;
+          startTime?: number;
+          endTime?: number;
+        }) => ({
+          suiteName: suite.name ? suite.name.replace(/^.*[\\/]src[\\/]/, "src/") : "Test Suite",
+          passed: (suite.assertionResults || []).filter(
+            (a: { status?: string }) => a.status === "passed",
+          ).length,
+          total: (suite.assertionResults || []).length,
+          durationMs:
+            suite.endTime && suite.startTime ? Math.round(suite.endTime - suite.startTime) : 25,
+        }),
+      );
+
+      return {
+        testFramework: "Vitest v5.0.1",
+        totalTests,
+        passedTests,
+        failedTests,
+        testSuitesCount,
+        executionTimestamp: new Date().toISOString(),
+        allPassed,
+        suiteBreakdown,
+      };
+    } catch (err) {
+      console.warn("Failed to parse test execution JSON:", err);
+    }
+  }
+
+  // If real results are missing or invalid, return unverified state (no fake passed claims)
   return {
     testFramework: "Vitest v5.0.1",
-    totalTests: 70,
-    passedTests: 70,
+    totalTests: 0,
+    passedTests: 0,
     failedTests: 0,
-    testSuitesCount: 8,
+    testSuitesCount: 0,
     executionTimestamp: new Date().toISOString(),
-    allPassed: true,
-    suiteBreakdown: [
-      { suiteName: "src/tests/brand-customizer.test.ts", passed: 9, total: 9, durationMs: 19 },
-      { suiteName: "src/utils/network.test.ts", passed: 3, total: 3, durationMs: 11 },
-      { suiteName: "src/tests/webhook-engine.test.ts", passed: 19, total: 19, durationMs: 861 },
-      { suiteName: "src/tests/batch-claim.test.ts", passed: 5, total: 5, durationMs: 17 },
-      { suiteName: "src/lib/stellar.test.ts", passed: 6, total: 6, durationMs: 11 },
-      { suiteName: "src/tests/passkey-signer.test.ts", passed: 5, total: 5, durationMs: 118 },
-      { suiteName: "src/tests/ledger-bridge.test.ts", passed: 9, total: 9, durationMs: 154 },
-      { suiteName: "src/tests/e2e-protocol-flow.test.ts", passed: 14, total: 14, durationMs: 28 },
-    ],
+    allPassed: false,
+    suiteBreakdown: [],
   };
 }
 
 /**
  * Compiles the formal SOC 2 Trust Services Criteria Control Manifest.
  */
-export function compileControlManifest(): Soc2ControlMapping[] {
+export function compileControlManifest(testAudit?: TestExecutionAudit): Soc2ControlMapping[] {
+  const testsPass = Boolean(testAudit && testAudit.allPassed && testAudit.totalTests > 0);
   return [
     // Confidentiality Controls
     {
@@ -277,7 +308,7 @@ export function compileControlManifest(): Soc2ControlMapping[] {
       description:
         "GitHub Actions CI suite executes comprehensive unit and integration tests on all commits before code integration.",
       evidenceFiles: ["ci/ci-audit-summary.json", "tests/test-results.json"],
-      status: "Compliant",
+      status: testsPass ? "Compliant" : "Review Needed",
       verificationProcedure: "Review CI workflow run reports and 100% test pass confirmation.",
       automatedTestReference: "src/tests/e2e-protocol-flow.test.ts",
     },
@@ -299,14 +330,69 @@ export function compileControlManifest(): Soc2ControlMapping[] {
 }
 
 /**
+ * Resolves current commit SHA from environment or git
+ */
+export function resolveCommitSha(): string {
+  if (typeof process !== "undefined" && process.env) {
+    if (process.env.GIT_COMMIT_SHA) return process.env.GIT_COMMIT_SHA;
+    if (process.env.GITHUB_SHA) return process.env.GITHUB_SHA;
+    if (process.versions?.node) {
+      try {
+        const req = (0, eval)("typeof require !== 'undefined' ? require : null");
+        if (req) {
+          const cp = req("child_process");
+          return cp.execSync("git rev-parse HEAD", { encoding: "utf8" }).trim();
+        }
+      } catch {
+        // Ignore in environments where git or child_process is unavailable
+      }
+    }
+  }
+  if (typeof import.meta !== "undefined" && import.meta.env?.VITE_COMMIT_SHA) {
+    return import.meta.env.VITE_COMMIT_SHA;
+  }
+  return "dev-head";
+}
+
+/**
  * Builds the comprehensive bundle manifest.
+ * Can construct without root-dependent fields so it can be hashed before signing.
  */
 export function buildBundleManifest(
-  rootDigest: string,
-  signatureInfo: { algorithm: string; keyId: string; signatureHex: string },
-  commitSha: string = "f904fa9146e1d06d25acf8cdd0e814ba00839808",
+  arg1?: unknown,
+  arg2?: unknown,
+  arg3?: unknown,
 ): Soc2BundleManifest {
-  const controls = compileControlManifest();
+  let rootDigest: string | undefined;
+  let signatureInfo: { algorithm: string; keyId: string; signatureHex: string } | undefined;
+  let commitSha: string;
+  let testAudit: TestExecutionAudit | undefined;
+
+  if (
+    typeof arg1 === "string" &&
+    arg2 &&
+    typeof arg2 === "object" &&
+    ("algorithm" in arg2 || "signatureHex" in arg2)
+  ) {
+    // Called with (rootDigest, signatureInfo, commitSha)
+    rootDigest = arg1;
+    signatureInfo = arg2 as { algorithm: string; keyId: string; signatureHex: string };
+    commitSha = (typeof arg3 === "string" ? arg3 : undefined) || resolveCommitSha();
+  } else if (typeof arg1 === "string" && !arg2 && !arg3) {
+    // Called with (commitSha)
+    commitSha = arg1;
+  } else {
+    // Called with (testAudit, commitSha, rootDigest)
+    if (arg1 && typeof arg1 === "object" && "testFramework" in arg1) {
+      testAudit = arg1 as TestExecutionAudit;
+    }
+    commitSha = (typeof arg2 === "string" ? arg2 : undefined) || resolveCommitSha();
+    if (typeof arg3 === "string") {
+      rootDigest = arg3;
+    }
+  }
+
+  const controls = compileControlManifest(testAudit);
   const compliantCount = controls.filter((c) => c.status === "Compliant").length;
 
   const categoryCounts: Record<
@@ -322,7 +408,7 @@ export function buildBundleManifest(
     categoryCounts[c.category] = (categoryCounts[c.category] || 0) + 1;
   }
 
-  return {
+  const manifest: Soc2BundleManifest = {
     manifestVersion: "1.0.0",
     packTitle: "StormSale Automated SOC 2 Type II Evidence Bundle",
     organization: "StormSale Protocol Compliance & Enterprise Security",
@@ -335,7 +421,14 @@ export function buildBundleManifest(
       categories: categoryCounts,
     },
     controls,
-    rootDigest,
-    signatureInfo,
   };
+
+  if (rootDigest) {
+    manifest.rootDigest = rootDigest;
+  }
+  if (signatureInfo) {
+    manifest.signatureInfo = signatureInfo;
+  }
+
+  return manifest;
 }

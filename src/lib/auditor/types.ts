@@ -116,8 +116,8 @@ export interface Soc2BundleManifest {
     categories: Record<Soc2Category, number>;
   };
   controls: Soc2ControlMapping[];
-  rootDigest: string;
-  signatureInfo: {
+  rootDigest?: string;
+  signatureInfo?: {
     algorithm: string;
     keyId: string;
     signatureHex: string;
@@ -130,6 +130,8 @@ export interface EvidencePackGenerationOptions {
   auditorOrganization?: string;
   customCiLogsDir?: string;
   includeFullSourceTree?: boolean;
+  testResultsJson?: string;
+  onProgress?: (step: string) => void;
 }
 
 export interface PackVerificationResult {

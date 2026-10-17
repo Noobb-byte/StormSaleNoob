@@ -61,24 +61,19 @@ export const Soc2EvidenceExport: React.FC = () => {
 
     try {
       setIsExporting(true);
-      setExportStep("Snapshotting Soroban smart contract state & security controls...");
-      await new Promise((r) => setTimeout(r, 600));
+      setExportStep("Initializing evidence collection pipeline...");
 
-      setExportStep("Aggregating CI test runs and quality gate logs...");
-      await new Promise((r) => setTimeout(r, 600));
-
-      setExportStep("Calculating deterministic SHA-256 codebase hashes and Merkle root...");
-      await new Promise((r) => setTimeout(r, 600));
-
-      setExportStep("Signing package root digest with platform auditor Ed25519 key...");
-      await new Promise((r) => setTimeout(r, 600));
-
-      setExportStep("Packaging verification receipts and compiling ZIP archive...");
-
-      const result = await exportSoc2EvidencePackAction({
-        userAddress,
-        userRole,
-      });
+      const result = await exportSoc2EvidencePackAction(
+        {
+          userAddress,
+          userRole,
+        },
+        {
+          onProgress: (step: string) => {
+            setExportStep(step);
+          },
+        },
+      );
 
       setLastExport({
         id: result.rootDigest.slice(0, 16),

@@ -9,7 +9,6 @@ import { Keypair } from "@stellar/stellar-sdk";
 const keypair = Keypair.random();
 const secret = keypair.secret();
 const publicKey = keypair.publicKey();
-const rawSeedHex = Buffer.from(keypair.rawPublicKey()).toString("hex");
 
 console.log("\n========================================================");
 console.log("⚡ STORMSALE PLATFORM AUDITOR KEY GENERATION");
@@ -19,6 +18,6 @@ console.log(`Secret Seed (S...):   ${secret}`);
 console.log("========================================================");
 console.log("\nTo configure this auditor key in your environment:");
 console.log("Add the following entry to your .env file:\n");
-console.log(`VITE_AUDITOR_PRIVATE_KEY=${secret}\n`);
+console.log(`AUDITOR_PRIVATE_KEY=${secret}\n`);
 console.log("⚠️  KEEP THE SECRET SEED SECURE. NEVER COMMIT IT TO GIT.");
 console.log("========================================================\n");
