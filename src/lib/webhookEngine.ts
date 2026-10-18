@@ -7,6 +7,7 @@ import type {
   SimulationMode,
 } from "../types/webhook";
 import { generateWebhookSecret, generateWebhookSignature } from "./webhookSecurity";
+import { API_URL } from "../utils/api";
 
 const STORAGE_ENDPOINTS_KEY = "stormsale_webhook_endpoints_v1";
 const STORAGE_DELIVERIES_KEY = "stormsale_webhook_deliveries_v1";
@@ -392,12 +393,45 @@ export async function executeHttpDispatch(
       "X-StormSale-Timestamp": timestamp.toString(),
     };
 
-    const res = await fetch(delivery.url, {
-      method: "POST",
-      headers,
-      body: JSON.stringify(delivery.payload),
-      signal: controller.signal,
-    });
+    let res: Response;
+
+    // Send dispatch server-side via backend relay to preserve arbitrary HTTP/HTTPS endpoints under browser CSP
+    try {
+      const relayRes = await fetch(`${API_URL}/webhooks/dispatch`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          targetUrl: delivery.url,
+          headers,
+          payload: delivery.payload,
+          deliveryId: delivery.id,
+          event: delivery.event,
+        }),
+        signal: controller.signal,
+      });
+
+      if (relayRes.status === 404 || relayRes.status === 502) {
+        // Fallback to direct client fetch if server relay route is not implemented
+        res = await fetch(delivery.url, {
+          method: "POST",
+          headers,
+          body: JSON.stringify(delivery.payload),
+          signal: controller.signal,
+        });
+      } else {
+        res = relayRes;
+      }
+    } catch {
+      // Fallback to direct client fetch if backend server is offline/unreachable
+      res = await fetch(delivery.url, {
+        method: "POST",
+        headers,
+        body: JSON.stringify(delivery.payload),
+        signal: controller.signal,
+      });
+    }
 
     const responseText = await res.text();
     const durationMs = Date.now() - startTime;
