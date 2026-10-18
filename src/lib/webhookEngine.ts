@@ -275,6 +275,7 @@ export interface DispatchExecutionResult {
   durationMs: number;
   signatureHeader: string;
   error?: string;
+  isRelayFailure?: boolean;
 }
 
 /**
@@ -380,70 +381,102 @@ export async function executeHttpDispatch(
   }
 
   // Real HTTP dispatch
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 8000);
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+    "User-Agent": "StormSale-Conversion-Webhook-Engine/1.0",
+    "X-StormSale-Signature": signatureHeader,
+    "X-StormSale-Event": delivery.event,
+    "X-StormSale-Delivery-Id": delivery.id,
+    "X-StormSale-Timestamp": timestamp.toString(),
+  };
+
+  let res: Response;
+  let isRelayDispatched = false;
+  let isRelayFailure = false;
+
+  // Attempt server-side dispatch relay first with its own dedicated timeout budget
+  const relayController = new AbortController();
+  const relayTimeoutId = setTimeout(() => relayController.abort(), 8000);
 
   try {
-    const headers: Record<string, string> = {
-      "Content-Type": "application/json",
-      "User-Agent": "StormSale-Conversion-Webhook-Engine/1.0",
-      "X-StormSale-Signature": signatureHeader,
-      "X-StormSale-Event": delivery.event,
-      "X-StormSale-Delivery-Id": delivery.id,
-      "X-StormSale-Timestamp": timestamp.toString(),
-    };
+    const relayRes = await fetch(`${API_URL}/webhooks/dispatch`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-StormSale-Delivery-Id": delivery.id,
+        "X-StormSale-Event": delivery.event,
+      },
+      body: JSON.stringify({
+        targetUrl: delivery.url,
+        headers,
+        payload: delivery.payload,
+        deliveryId: delivery.id,
+        event: delivery.event,
+      }),
+      signal: relayController.signal,
+    });
 
-    let res: Response;
+    clearTimeout(relayTimeoutId);
+    // All relay HTTP responses (including 404, 502, etc.) are returned as delivery results
+    // rather than triggering a duplicate direct POST to the target
+    res = relayRes;
+    isRelayDispatched = true;
 
-    // Send dispatch server-side via backend relay to preserve arbitrary HTTP/HTTPS endpoints under browser CSP
+    if (relayRes.headers.get("x-stormsale-relay-error") === "true") {
+      isRelayFailure = true;
+    }
+  } catch (relayErr: unknown) {
+    clearTimeout(relayTimeoutId);
+
+    // Fall back to direct browser fetch ONLY on confirmed relay connection failure
+    // Provide fallback request with a fresh AbortController with its own full timeout budget
+    const fallbackController = new AbortController();
+    const fallbackTimeoutId = setTimeout(() => fallbackController.abort(), 8000);
+
     try {
-      const relayRes = await fetch(`${API_URL}/webhooks/dispatch`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          targetUrl: delivery.url,
-          headers,
-          payload: delivery.payload,
-          deliveryId: delivery.id,
-          event: delivery.event,
-        }),
-        signal: controller.signal,
-      });
-
-      if (relayRes.status === 404 || relayRes.status === 502) {
-        // Fallback to direct client fetch if server relay route is not implemented
-        res = await fetch(delivery.url, {
-          method: "POST",
-          headers,
-          body: JSON.stringify(delivery.payload),
-          signal: controller.signal,
-        });
-      } else {
-        res = relayRes;
-      }
-    } catch {
-      // Fallback to direct client fetch if backend server is offline/unreachable
       res = await fetch(delivery.url, {
         method: "POST",
         headers,
         body: JSON.stringify(delivery.payload),
-        signal: controller.signal,
+        signal: fallbackController.signal,
       });
+    } finally {
+      clearTimeout(fallbackTimeoutId);
     }
+  }
 
+  try {
     const responseText = await res.text();
     const durationMs = Date.now() - startTime;
 
+    // Distinguish relay-generated failures from target responses before retry classification
+    if (isRelayDispatched && !isRelayFailure) {
+      try {
+        const parsed = JSON.parse(responseText);
+        if (parsed && typeof parsed === "object" && (parsed.relayError || parsed.isRelayError)) {
+          isRelayFailure = true;
+        }
+      } catch {
+        // Not JSON or target response body
+      }
+    }
+
     return {
-      success: res.ok,
+      success: res.ok && !isRelayFailure,
       httpStatusCode: res.status,
-      statusText: res.statusText || (res.ok ? "OK" : "Error"),
+      statusText: isRelayFailure
+        ? `Relay Gateway Error (${res.status})`
+        : res.statusText || (res.ok ? "OK" : "Error"),
       signatureHeader,
       responseBody: responseText.slice(0, 1000),
       durationMs,
-      error: res.ok ? undefined : `HTTP ${res.status}: ${res.statusText}`,
+      error:
+        res.ok && !isRelayFailure
+          ? undefined
+          : isRelayFailure
+            ? `Relay Gateway Error (HTTP ${res.status}): ${responseText.slice(0, 200)}`
+            : `HTTP ${res.status}: ${res.statusText || "Request Failed"}`,
+      isRelayFailure,
     };
   } catch (err: unknown) {
     const durationMs = Date.now() - startTime;
@@ -460,8 +493,6 @@ export async function executeHttpDispatch(
       durationMs,
       error: message,
     };
-  } finally {
-    clearTimeout(timeoutId);
   }
 }
 
