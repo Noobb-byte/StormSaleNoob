@@ -3,12 +3,8 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "../ui
 import { Button } from "../ui/button";
 import { useWeb3 } from "../../hooks/useWeb3";
 import { useNotification } from "../../context/NotificationContext";
-import {
-  exportSoc2EvidencePackAction,
-  getExportAuditHistory,
-  type ExportAuditEvent,
-} from "../../lib/auditor/exportService";
-import { verifyEvidenceZip } from "../../lib/auditor/verifier";
+import { getExportAuditHistory, type ExportAuditEvent } from "../../lib/auditor/exportService";
+import { verifyEvidenceZip, getAuthorizedAuditorKeys } from "../../lib/auditor/verifier";
 import type { PackVerificationResult } from "../../lib/auditor/types";
 import {
   ShieldCheck,
@@ -26,12 +22,10 @@ import {
 } from "lucide-react";
 
 export const Soc2EvidenceExport: React.FC = () => {
-  const { userAddress, userRole, updateUserRole, isConnected, openWalletModal } = useWeb3();
+  const { userRole, updateUserRole, isConnected } = useWeb3();
   const { showNotification } = useNotification();
 
-  const [isExporting, setIsExporting] = useState(false);
-  const [exportStep, setExportStep] = useState<string>("");
-  const [lastExport, setLastExport] = useState<ExportAuditEvent | null>(() => {
+  const [lastExport] = useState<ExportAuditEvent | null>(() => {
     const history = getExportAuditHistory();
     return history.length > 0 ? history[0] : null;
   });
@@ -45,63 +39,12 @@ export const Soc2EvidenceExport: React.FC = () => {
     userRole?.toUpperCase() === "AUDITOR" || userRole?.toUpperCase() === "ADMIN";
 
   const handleExport = async () => {
-    if (!isConnected) {
-      openWalletModal();
-      return;
-    }
-
-    if (!isAuditorOrAdmin) {
-      showNotification({
-        type: "warning",
-        title: "Role Authorization Required",
-        message: "You must assume the Auditor role to export SOC 2 compliance bundles.",
-      });
-      return;
-    }
-
-    try {
-      setIsExporting(true);
-      setExportStep("Initializing evidence collection pipeline...");
-
-      const result = await exportSoc2EvidencePackAction(
-        {
-          userAddress,
-          userRole,
-        },
-        {
-          onProgress: (step: string) => {
-            setExportStep(step);
-          },
-        },
-      );
-
-      setLastExport({
-        id: result.rootDigest.slice(0, 16),
-        timestamp: result.manifest.generatedAt,
-        exporterAddress: userAddress || "ANONYMOUS",
-        role: userRole || "AUDITOR",
-        filename: result.filename,
-        rootDigest: result.rootDigest,
-        totalFiles: result.totalFiles,
-        status: "Exported",
-      });
-
-      showNotification({
-        type: "success",
-        title: "SOC 2 Pack Exported",
-        message: `Successfully bundled and signed ${result.totalFiles} evidence files into ${result.filename}`,
-      });
-    } catch (err: unknown) {
-      console.error("SOC 2 export error:", err);
-      showNotification({
-        type: "error",
-        title: "Export Failed",
-        message: err instanceof Error ? err.message : "Failed to generate SOC 2 evidence pack",
-      });
-    } finally {
-      setIsExporting(false);
-      setExportStep("");
-    }
+    showNotification({
+      type: "warning",
+      title: "Server / CI Signing Required",
+      message:
+        "Cryptographic auditor signing is restricted to server-side or CI environments to protect platform keys. Use the CI pipeline or verify-evidence-pack.mjs script.",
+    });
   };
 
   const handleVerifyUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -114,7 +57,9 @@ export const Soc2EvidenceExport: React.FC = () => {
       setVerificationResult(null);
 
       const arrayBuffer = await file.arrayBuffer();
-      const result = await verifyEvidenceZip(arrayBuffer);
+      const result = await verifyEvidenceZip(arrayBuffer, {
+        authorizedKeys: getAuthorizedAuditorKeys(),
+      });
       setVerificationResult(result);
 
       if (result.valid) {
@@ -169,22 +114,23 @@ export const Soc2EvidenceExport: React.FC = () => {
             </div>
 
             <div className="flex flex-col sm:flex-row lg:flex-col gap-3 w-full lg:w-auto shrink-0">
+              <div className="p-3 rounded-2xl bg-amber-500/10 border border-amber-500/25 flex items-start gap-2.5 max-w-sm text-xs text-amber-800 dark:text-amber-300">
+                <AlertTriangle className="w-4 h-4 text-amber-600 dark:text-amber-400 shrink-0 mt-0.5" />
+                <span>
+                  <strong>Server / CI Signing Required:</strong> Cryptographic auditor key signing
+                  is restricted to server-side or CI environments to prevent private key exposure in
+                  client bundles.
+                </span>
+              </div>
+
               <Button
                 onClick={handleExport}
-                disabled={isExporting}
-                className="h-12 px-6 rounded-2xl bg-indigo-600 hover:bg-indigo-700 text-white font-bold shadow-lg shadow-indigo-600/25 flex items-center justify-center gap-2.5 transition-all"
+                disabled={true}
+                className="h-12 px-6 rounded-2xl bg-zinc-200 dark:bg-zinc-800 text-zinc-500 dark:text-zinc-400 font-bold cursor-not-allowed flex items-center justify-center gap-2.5 transition-all shadow-none"
+                title="Cryptographic signing is restricted to server-side or CI environments."
               >
-                {isExporting ? (
-                  <>
-                    <Loader2 className="w-5 h-5 animate-spin" />
-                    <span>Packaging Bundle...</span>
-                  </>
-                ) : (
-                  <>
-                    <Download className="w-5 h-5" />
-                    <span>Export SOC 2 Evidence Pack</span>
-                  </>
-                )}
+                <Download className="w-5 h-5 text-zinc-400 dark:text-zinc-500" />
+                <span>Export SOC 2 Pack (Server / CI Only)</span>
               </Button>
 
               {!isAuditorOrAdmin && isConnected && (
@@ -200,18 +146,8 @@ export const Soc2EvidenceExport: React.FC = () => {
             </div>
           </div>
 
-          {/* Export progress feedback */}
-          {isExporting && exportStep && (
-            <div className="mt-6 p-4 rounded-2xl bg-indigo-100/70 dark:bg-indigo-950/50 border border-indigo-200 dark:border-indigo-800/60 flex items-center gap-3">
-              <Loader2 className="w-4 h-4 text-indigo-600 dark:text-indigo-400 animate-spin shrink-0" />
-              <p className="text-xs font-semibold text-indigo-900 dark:text-indigo-200">
-                {exportStep}
-              </p>
-            </div>
-          )}
-
           {/* Last export pill */}
-          {lastExport && !isExporting && (
+          {lastExport && (
             <div className="mt-6 pt-5 border-t border-slate-200/70 dark:border-zinc-800 flex flex-wrap items-center justify-between gap-3 text-xs">
               <div className="flex items-center gap-2 text-zinc-500 dark:text-zinc-400">
                 <FileArchive className="w-4 h-4 text-indigo-500" />

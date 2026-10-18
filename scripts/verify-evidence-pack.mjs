@@ -36,6 +36,10 @@ function sha256Hex(buffer) {
   return crypto.createHash("sha256").update(buffer).digest("hex");
 }
 
+function normalizePath(filePath) {
+  return filePath.replace(/\\/g, "/").replace(/^\.\//, "");
+}
+
 function computeRootDigest(fileHashes) {
   const sortedKeys = Object.keys(fileHashes).sort();
   const canonicalString = sortedKeys.map((p) => `${p}:${fileHashes[p]}`).join("\n");
@@ -57,12 +61,18 @@ async function verify() {
 
   for (const { relPath, entry } of entries) {
     const data = await entry.async("nodebuffer");
-    filesMap[relPath] = data;
+    filesMap[normalizePath(relPath)] = data;
   }
 
-  // 1. Locate signature.json & hashes.json
-  const sigKey = Object.keys(filesMap).find((k) => k.endsWith("signature.json"));
-  const hashKey = Object.keys(filesMap).find((k) => k.endsWith("hashes.json"));
+  // 1. Locate signature.json & hashes.json with proper path boundary check
+  const sigKey = Object.keys(filesMap).find((k) => {
+    const p = normalizePath(k);
+    return p === "signature.json" || p.endsWith("/signature.json");
+  });
+  const hashKey = Object.keys(filesMap).find((k) => {
+    const p = normalizePath(k);
+    return p === "hashes.json" || p.endsWith("/hashes.json");
+  });
 
   if (!sigKey || !hashKey) {
     console.error("❌ Verification failed: Archive is missing signature.json or hashes.json.");
@@ -147,7 +157,11 @@ async function verify() {
 
   // 5. Reject any archive entries not listed in hashes.json
   for (const rawKey of Object.keys(filesMap)) {
-    const relKey = prefix && rawKey.startsWith(prefix) ? rawKey.slice(prefix.length) : rawKey;
+    const normalizedKey = normalizePath(rawKey);
+    const relKey =
+      prefix && normalizedKey.startsWith(prefix)
+        ? normalizedKey.slice(prefix.length)
+        : normalizedKey;
     if (relKey === "hashes.json" || relKey === "signature.json") continue;
     if (!hashesManifest.files[relKey]) {
       console.error(`  ❌ TAMPER DETECTED: Archive entry not listed in hashes.json: ${relKey}`);

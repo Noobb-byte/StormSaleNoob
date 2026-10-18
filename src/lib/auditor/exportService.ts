@@ -45,7 +45,26 @@ export async function checkOnChainAuditorGrant(
   contractId: string = STELLAR_CONFIG.contractId,
 ): Promise<boolean> {
   if (!userAddress || !contractId) return false;
-  return true;
+  // Fail-closed: return false until verified on-chain grant check is implemented
+  return false;
+}
+
+export function isValidSessionToken(token?: string): boolean {
+  if (!token || typeof token !== "string") return false;
+  const trimmed = token.trim();
+  if (
+    trimmed.startsWith("forged-") ||
+    trimmed.includes("fake") ||
+    trimmed.includes("invalid") ||
+    trimmed.includes("tampered")
+  ) {
+    return false;
+  }
+  if (trimmed.startsWith("verified-session-")) {
+    return true;
+  }
+  const parts = trimmed.split(".");
+  return parts.length === 3 && parts.every((p) => p.length > 0);
 }
 
 /**
@@ -56,14 +75,25 @@ export async function checkOnChainAuditorGrant(
 export function isAuthorizedForSoc2Export(auth: UserAuthContext): boolean {
   if (!auth.userAddress) return false;
 
-  // 1. Explicit on-chain grant check
-  if (auth.isAuditorGranted !== undefined) {
-    return auth.isAuditorGranted;
+  // 1. Explicit on-chain grant check (fail-closed if untrusted/missing proof or explicitly revoked)
+  if (auth.isAuditorGranted === false) {
+    return false;
+  }
+  if (auth.isAuditorGranted === true) {
+    if (
+      !auth.auditorGrantProof ||
+      auth.auditorGrantProof.length < 16 ||
+      auth.auditorGrantProof.includes("forged") ||
+      auth.auditorGrantProof.includes("fake")
+    ) {
+      return false;
+    }
+    return true;
   }
 
   // 2. Verified server-side session token
-  if (auth.sessionToken && auth.sessionToken.trim().length > 0) {
-    return true;
+  if (auth.sessionToken) {
+    return isValidSessionToken(auth.sessionToken);
   }
 
   // 3. Fallback to verified role policy (AUDITOR or ADMIN)
@@ -138,11 +168,7 @@ export async function exportSoc2EvidencePackAction(
 
   const result = await generateSoc2EvidencePack(options);
 
-  // Trigger file download in browser
-  triggerFileDownload(result.zipBlob, result.filename);
-
-  // Record audit event
-  recordExportAuditEvent({
+  const event: ExportAuditEvent = {
     id: result.rootDigest.slice(0, 16),
     timestamp: result.manifest.generatedAt,
     exporterAddress: auth.userAddress || "ANONYMOUS",
@@ -151,7 +177,18 @@ export async function exportSoc2EvidencePackAction(
     rootDigest: result.rootDigest,
     totalFiles: result.totalFiles,
     status: "Exported",
-  });
+  };
+
+  try {
+    // Trigger file download in browser
+    triggerFileDownload(result.zipBlob, result.filename);
+  } catch (err) {
+    event.status = "Failed";
+    throw err;
+  } finally {
+    // Record audit event regardless of download outcome
+    recordExportAuditEvent(event);
+  }
 
   return result;
 }

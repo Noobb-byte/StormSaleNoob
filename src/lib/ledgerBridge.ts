@@ -187,9 +187,9 @@ export async function connectLedgerDevice(
       bipPath: normalizedPath,
       appVersion: versionConfig?.version || "Ready",
     };
-  } catch (err: any) {
+  } catch (err: unknown) {
     const parsed = parseLedgerError(err);
-    throw new Error(parsed.friendlyMessage);
+    throw new Error(parsed.friendlyMessage, { cause: err });
   } finally {
     if (transport) {
       try {
@@ -279,11 +279,12 @@ export async function signLedgerTransaction(
     const publicKey = StrKey.encodeEd25519PublicKey(pubKeyResult.rawPublicKey);
 
     // Attach signature to Stellar transaction envelope
-    tx.addSignature(publicKey, signatureBuffer.signature as any);
+    const signatureBase64 = Buffer.from(signatureBuffer.signature).toString("base64");
+    tx.addSignature(publicKey, signatureBase64);
     return tx.toXDR();
-  } catch (err: any) {
+  } catch (err: unknown) {
     const parsed = parseLedgerError(err);
-    throw new Error(parsed.friendlyMessage);
+    throw new Error(parsed.friendlyMessage, { cause: err });
   } finally {
     if (transport) {
       try {

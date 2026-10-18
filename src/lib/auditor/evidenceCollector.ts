@@ -113,6 +113,25 @@ export function collectCiAuditLogs(): CiAuditLogItem[] {
   ];
 }
 
+function getBuiltinNodeModule<T = any>(moduleName: string): T | null {
+  if (typeof process === "undefined") return null;
+  if (typeof (process as any).getBuiltinModule === "function") {
+    try {
+      return (process as any).getBuiltinModule(moduleName);
+    } catch {
+      // Fall through
+    }
+  }
+  if (typeof (globalThis as any).require === "function") {
+    try {
+      return (globalThis as any).require(moduleName);
+    } catch {
+      // Fall through
+    }
+  }
+  return null;
+}
+
 /**
  * Gathers automated test run results using real Vitest JSON execution records.
  * If results are unavailable, corrupted, or missing, returns an audit status of
@@ -124,11 +143,9 @@ export function collectTestRunResults(customResultsJson?: string): TestExecution
   // In Node.js environments (CLI / test runner / CI), attempt to read test-results.json
   if (!jsonString && typeof process !== "undefined" && process.versions?.node) {
     try {
-      // Use indirect eval so bundlers don't emit warnings or analyze as static Node imports
-      const req = (0, eval)("typeof require !== 'undefined' ? require : null");
-      if (req) {
-        const fs = req("fs");
-        const path = req("path");
+      const fs = getBuiltinNodeModule<any>("fs");
+      const path = getBuiltinNodeModule<any>("path");
+      if (fs && path) {
         const filePath = path.resolve(process.cwd(), "test-results.json");
         if (fs.existsSync(filePath)) {
           jsonString = fs.readFileSync(filePath, "utf8");
@@ -338,9 +355,8 @@ export function resolveCommitSha(): string {
     if (process.env.GITHUB_SHA) return process.env.GITHUB_SHA;
     if (process.versions?.node) {
       try {
-        const req = (0, eval)("typeof require !== 'undefined' ? require : null");
-        if (req) {
-          const cp = req("child_process");
+        const cp = getBuiltinNodeModule<any>("child_process");
+        if (cp) {
           return cp.execSync("git rev-parse HEAD", { encoding: "utf8" }).trim();
         }
       } catch {
@@ -354,43 +370,59 @@ export function resolveCommitSha(): string {
   return "dev-head";
 }
 
+export interface BuildBundleManifestOptions {
+  testAudit?: TestExecutionAudit;
+  commitSha?: string;
+  rootDigest?: string;
+  signatureInfo?: { algorithm: string; keyId: string; signatureHex: string };
+}
+
 /**
  * Builds the comprehensive bundle manifest.
  * Can construct without root-dependent fields so it can be hashed before signing.
  */
 export function buildBundleManifest(
-  arg1?: unknown,
+  optionsOrArg1?: BuildBundleManifestOptions | TestExecutionAudit | string,
   arg2?: unknown,
   arg3?: unknown,
 ): Soc2BundleManifest {
   let rootDigest: string | undefined;
   let signatureInfo: { algorithm: string; keyId: string; signatureHex: string } | undefined;
-  let commitSha: string;
+  let commitSha: string | undefined;
   let testAudit: TestExecutionAudit | undefined;
 
-  if (
-    typeof arg1 === "string" &&
+  if (optionsOrArg1 && typeof optionsOrArg1 === "object" && !("testFramework" in optionsOrArg1)) {
+    // Called with typed options object
+    const opts = optionsOrArg1 as BuildBundleManifestOptions;
+    testAudit = opts.testAudit;
+    commitSha = opts.commitSha;
+    rootDigest = opts.rootDigest;
+    signatureInfo = opts.signatureInfo;
+  } else if (
+    typeof optionsOrArg1 === "string" &&
     arg2 &&
     typeof arg2 === "object" &&
     ("algorithm" in arg2 || "signatureHex" in arg2)
   ) {
-    // Called with (rootDigest, signatureInfo, commitSha)
-    rootDigest = arg1;
+    // Legacy: Called with (rootDigest, signatureInfo, commitSha)
+    rootDigest = optionsOrArg1;
     signatureInfo = arg2 as { algorithm: string; keyId: string; signatureHex: string };
-    commitSha = (typeof arg3 === "string" ? arg3 : undefined) || resolveCommitSha();
-  } else if (typeof arg1 === "string" && !arg2 && !arg3) {
-    // Called with (commitSha)
-    commitSha = arg1;
+    commitSha = typeof arg3 === "string" ? arg3 : undefined;
+  } else if (typeof optionsOrArg1 === "string" && !arg2 && !arg3) {
+    // Legacy: Called with (commitSha)
+    commitSha = optionsOrArg1;
   } else {
-    // Called with (testAudit, commitSha, rootDigest)
-    if (arg1 && typeof arg1 === "object" && "testFramework" in arg1) {
-      testAudit = arg1 as TestExecutionAudit;
+    // Legacy: Called with (testAudit, commitSha, rootDigest)
+    if (optionsOrArg1 && typeof optionsOrArg1 === "object" && "testFramework" in optionsOrArg1) {
+      testAudit = optionsOrArg1 as TestExecutionAudit;
     }
-    commitSha = (typeof arg2 === "string" ? arg2 : undefined) || resolveCommitSha();
+    commitSha = typeof arg2 === "string" ? arg2 : undefined;
     if (typeof arg3 === "string") {
       rootDigest = arg3;
     }
   }
+
+  commitSha = commitSha || resolveCommitSha();
 
   const controls = compileControlManifest(testAudit);
   const compliantCount = controls.filter((c) => c.status === "Compliant").length;

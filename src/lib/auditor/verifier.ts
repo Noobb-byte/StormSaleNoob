@@ -14,6 +14,7 @@ import type {
 
 export interface VerificationOptions {
   authorizedKeys?: string[];
+  allowUnpinnedKeys?: boolean;
 }
 
 let configuredAuthorizedKeys: string[] = [];
@@ -135,7 +136,11 @@ export async function verifyEvidenceFiles(
 
   let signatureValid = false;
 
-  if (allowlist.length > 0 && !allowlist.includes(signatureRecord.keyId)) {
+  if (allowlist.length === 0 && !options?.allowUnpinnedKeys) {
+    errors.push(
+      "No authorized auditor keys configured. Key pinning is required to prevent unverified signer keys.",
+    );
+  } else if (allowlist.length > 0 && !allowlist.includes(signatureRecord.keyId)) {
     errors.push(
       `Auditor Key ID ${signatureRecord.keyId} is not in the authorized auditor key allowlist.`,
     );

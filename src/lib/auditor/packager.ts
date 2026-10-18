@@ -234,7 +234,11 @@ export async function generateSoc2EvidencePack(
   internalFiles["receipts/receipts-manifest.json"] = JSON.stringify(receipts, null, 2);
 
   // Construct root-independent artifacts and include them in the hashed set
-  const bundleReceipt = createBundleReceipt(receipts, keyId, timestamp);
+  const bundleReceipt = createBundleReceipt({
+    fileReceipts: receipts,
+    signerKeyId: keyId,
+    timestamp,
+  });
   internalFiles["receipts/bundle-receipt.json"] = JSON.stringify(bundleReceipt, null, 2);
 
   const readme = buildReadmeText(keyId, timestamp);
@@ -242,7 +246,9 @@ export async function generateSoc2EvidencePack(
 
   internalFiles["public-key.pem"] = publicKeyPem;
 
-  const manifest = buildBundleManifest(undefined, testResults);
+  const manifest = buildBundleManifest({
+    testAudit: testResults,
+  });
   internalFiles["manifest.json"] = JSON.stringify(manifest, null, 2);
 
   // 4. Compute deterministic Codebase & Evidence Hashes Manifest
@@ -250,6 +256,8 @@ export async function generateSoc2EvidencePack(
   const hashesManifest = await generateHashesManifest(internalFiles, {
     timestamp,
     version: "1.0.0",
+    commitSha: manifest.commitSha,
+    includeFullSourceTree: options.includeFullSourceTree,
   });
 
   // 5. Sign the root digest with the platform auditor Ed25519 key
@@ -260,14 +268,16 @@ export async function generateSoc2EvidencePack(
     options.auditorOrganization,
   );
 
-  // 6. Populate root-dependent fields on in-memory objects after root digest is computed
-  manifest.rootDigest = hashesManifest.rootDigest;
-  manifest.signatureInfo = {
-    algorithm: signature.algorithm,
-    keyId: signature.keyId,
-    signatureHex: signature.signatureHex,
+  // 6. Create distinct signed manifest containing root digest and signature metadata
+  const signedManifest: Soc2BundleManifest = {
+    ...manifest,
+    rootDigest: hashesManifest.rootDigest,
+    signatureInfo: {
+      algorithm: signature.algorithm,
+      keyId: signature.keyId,
+      signatureHex: signature.signatureHex,
+    },
   };
-  bundleReceipt.rootDigest = hashesManifest.rootDigest;
 
   // Add metadata verification files
   internalFiles["hashes.json"] = JSON.stringify(hashesManifest, null, 2);
@@ -296,7 +306,7 @@ export async function generateSoc2EvidencePack(
     zipBuffer,
     filename,
     folderName,
-    manifest,
+    manifest: signedManifest,
     hashesManifest,
     signature,
     rootDigest: hashesManifest.rootDigest,

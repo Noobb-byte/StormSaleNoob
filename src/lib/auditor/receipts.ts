@@ -65,13 +65,20 @@ export interface BundleReceipt {
   }>;
 }
 
+export interface CreateBundleReceiptOptions {
+  fileReceipts: EvidenceReceipt[];
+  signerKeyId?: string;
+  timestamp?: string;
+  rootDigest?: string;
+}
+
 /**
  * Creates the bundle-level root verification receipt.
  * Supports being constructed without root-dependent fields so it can be included in the hashed set.
  */
 export function createBundleReceipt(
-  arg1: string | EvidenceReceipt[],
-  arg2: EvidenceReceipt[] | string,
+  optionsOrArg1: CreateBundleReceiptOptions | string | EvidenceReceipt[],
+  arg2?: EvidenceReceipt[] | string,
   arg3?: string,
   arg4?: string,
 ): BundleReceipt {
@@ -80,13 +87,23 @@ export function createBundleReceipt(
   let signerKeyId: string;
   let timestamp: string = new Date().toISOString();
 
-  if (typeof arg1 === "string" && Array.isArray(arg2)) {
-    rootDigest = arg1;
+  if (
+    typeof optionsOrArg1 === "object" &&
+    !Array.isArray(optionsOrArg1) &&
+    "fileReceipts" in optionsOrArg1
+  ) {
+    const opts = optionsOrArg1 as CreateBundleReceiptOptions;
+    fileReceipts = opts.fileReceipts || [];
+    signerKeyId = opts.signerKeyId || "UNKNOWN";
+    if (opts.timestamp) timestamp = opts.timestamp;
+    if (opts.rootDigest) rootDigest = opts.rootDigest;
+  } else if (typeof optionsOrArg1 === "string" && Array.isArray(arg2)) {
+    rootDigest = optionsOrArg1;
     fileReceipts = arg2;
     signerKeyId = (arg3 as string) || "UNKNOWN";
     if (arg4) timestamp = arg4;
-  } else if (Array.isArray(arg1)) {
-    fileReceipts = arg1;
+  } else if (Array.isArray(optionsOrArg1)) {
+    fileReceipts = optionsOrArg1;
     signerKeyId = (arg2 as string) || "UNKNOWN";
     if (arg3) timestamp = arg3;
     if (arg4) rootDigest = arg4;

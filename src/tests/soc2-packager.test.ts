@@ -27,7 +27,11 @@ import {
   AuditorSigningError,
 } from "../lib/auditor/signer";
 import { generateSoc2EvidencePack } from "../lib/auditor/packager";
-import { verifyEvidenceFiles, verifyEvidenceZip } from "../lib/auditor/verifier";
+import {
+  verifyEvidenceFiles,
+  verifyEvidenceZip,
+  setAuthorizedAuditorKeys,
+} from "../lib/auditor/verifier";
 import {
   isAuthorizedForSoc2Export,
   exportSoc2EvidencePackAction,
@@ -113,7 +117,7 @@ describe("SOC 2 Evidence Packager - Evidence & Control Manifest", () => {
     expect(ciLogs.length).toBeGreaterThanOrEqual(3);
 
     // When real results are missing, status indicates Review Needed without fake pass claims
-    const emptyRuns = collectTestRunResults();
+    const emptyRuns = collectTestRunResults("{}");
     expect(emptyRuns.totalTests).toBe(0);
     expect(emptyRuns.allPassed).toBe(false);
 
@@ -182,6 +186,33 @@ describe("SOC 2 Evidence Packager - Packaging & Tamper Detection", () => {
   beforeEach(() => {
     testKeypair = Keypair.random();
     testSecret = testKeypair.secret();
+    setAuthorizedAuditorKeys([testKeypair.publicKey()]);
+  });
+
+  it("fails verification when no authorized auditor keys are configured and unpinned keys are not allowed", async () => {
+    const pack = await generateSoc2EvidencePack({
+      auditorPrivateKey: testSecret,
+    });
+
+    // Temporarily clear authorized keys
+    setAuthorizedAuditorKeys([]);
+
+    const verification = await verifyEvidenceZip(pack.zipBuffer);
+    expect(verification.valid).toBe(false);
+    expect(verification.signatureValid).toBe(false);
+    expect(
+      verification.errors.some((e) => e.includes("No authorized auditor keys configured")),
+    ).toBe(true);
+
+    // If explicitly allowing unpinned keys, signature verification passes
+    const allowedVerification = await verifyEvidenceZip(pack.zipBuffer, {
+      allowUnpinnedKeys: true,
+    });
+    expect(allowedVerification.valid).toBe(true);
+    expect(allowedVerification.signatureValid).toBe(true);
+
+    // Restore authorized key for subsequent tests
+    setAuthorizedAuditorKeys([testKeypair.publicKey()]);
   });
 
   it("generates a complete, structured ZIP evidence pack", async () => {
@@ -407,14 +438,33 @@ describe("SOC 2 Evidence Packager - RBAC Authorization & Audit Logging", () => {
       }),
     ).toBe(true);
 
-    // 6. Explicit trusted on-chain grant
+    // 6. Explicit trusted on-chain grant with valid grant proof
+    expect(
+      isAuthorizedForSoc2Export({
+        userAddress: "GB1234567890",
+        userRole: "NONE",
+        isAuditorGranted: true,
+        auditorGrantProof: "proof-verified-onchain-grant-0x12345678",
+      }),
+    ).toBe(true);
+
+    // 6b. Reject unverified client-asserted grant (without valid proof)
     expect(
       isAuthorizedForSoc2Export({
         userAddress: "GB1234567890",
         userRole: "NONE",
         isAuditorGranted: true,
       }),
-    ).toBe(true);
+    ).toBe(false);
+
+    expect(
+      isAuthorizedForSoc2Export({
+        userAddress: "GB1234567890",
+        userRole: "NONE",
+        isAuditorGranted: true,
+        auditorGrantProof: "fake-proof",
+      }),
+    ).toBe(false);
 
     // 7. Revoked on-chain grant (denied even if role string says AUDITOR)
     expect(
@@ -430,9 +480,26 @@ describe("SOC 2 Evidence Packager - RBAC Authorization & Audit Logging", () => {
       isAuthorizedForSoc2Export({
         userAddress: "GB1234567890",
         userRole: "NONE",
-        sessionToken: "valid-session-jwt",
+        sessionToken: "verified-session-jwt.header.payload.signature",
       }),
     ).toBe(true);
+
+    // 8b. Reject forged or invalid session tokens
+    expect(
+      isAuthorizedForSoc2Export({
+        userAddress: "GB1234567890",
+        userRole: "NONE",
+        sessionToken: "forged-session-token",
+      }),
+    ).toBe(false);
+
+    expect(
+      isAuthorizedForSoc2Export({
+        userAddress: "GB1234567890",
+        userRole: "NONE",
+        sessionToken: "invalid-token",
+      }),
+    ).toBe(false);
 
     // Calling exportSoc2EvidencePackAction with unauthorized context throws AuditorAuthorizationError
     await expect(
